@@ -100,3 +100,6 @@ This package is the public, slim distribution of the MCP server. The underlying 
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+<!-- mcp-name: io.github.dbe006/rugguard-mcp -->
+

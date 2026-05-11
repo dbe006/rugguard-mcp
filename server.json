@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.dbe006/rugguard-mcp",
+  "title": "RugGuard",
+  "description": "Pre-trade rug-check API for AI agents. 14 deterministic heuristics on Base + 5 on Solana SPL, returns a weighted risk score 0-100, a verdict, and structured red flags. Settled in USDC via x402 — $0.01 per scan, no API key. Free `rugguard://metrics` resource exposes live per-heuristic empirical recall so an agent can audit the methodology before paying. Holds a dedicated EOA wallet locally with built-in spend caps (default $5/session, $10/24h), asset whitelist (USDC-on-Base only), and 10-second EIP-3009 replay window.",
+  "version": "0.1.1",
+  "repository": {
+    "url": "https://github.com/dbe006/rugguard-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "rugguard-mcp",
+      "version": "0.1.1",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
