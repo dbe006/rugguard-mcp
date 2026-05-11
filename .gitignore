@@ -1,0 +1,38 @@
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.eggs/
+*.egg
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Test/lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Locally-generated wallets / spend logs — must NEVER end up in git
+# (rugguard_mcp writes these to ~/.rugguard by default; this catches the
+# case where a curious user runs `python -m rugguard_mcp init` inside
+# the repo with RUGGUARD_MCP_WALLET_PATH set to a relative path).
+wallet.json
+spend_log.json
+.rugguard/

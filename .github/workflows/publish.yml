@@ -1,0 +1,65 @@
+name: Publish to PyPI
+
+# Triggered by a published GitHub Release. Uses PyPI Trusted Publishing
+# (OIDC) so no long-lived PyPI token is stored in repo secrets. Set up:
+#
+#   1. On PyPI, go to: https://pypi.org/manage/account/publishing/
+#   2. Add a Trusted Publisher with:
+#        Owner       : dbe006
+#        Repository  : rugguard-mcp
+#        Workflow    : publish.yml
+#        Environment : pypi   (matches `environment: name: pypi` below)
+#   3. Once configured, `gh release create v0.1.0` triggers this workflow
+#      and publishes the corresponding sdist + wheel to PyPI.
+#
+# Why OIDC + Trusted Publishing instead of a PYPI_TOKEN secret:
+#   - No long-lived credential to rotate or leak.
+#   - PyPI binds the release to the exact (org, repo, workflow, env) tuple
+#     so a fork or workflow rename can't impersonate the publisher.
+#   - GHA-issued OIDC token is single-use, short-lived (~10 min).
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  # Required for PyPI Trusted Publishing — issues an OIDC token bound to
+  # this exact workflow run.
+  id-token: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/rugguard-mcp
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+
+      - name: Build sdist + wheel
+        run: python -m build
+
+      - name: Verify build artifacts
+        run: |
+          ls -la dist/
+          # Sanity-check that the wheel name matches what PyPI Trusted
+          # Publishing is configured for. Mismatch = misconfigured tag or
+          # forgotten version bump.
+          test -f dist/rugguard_mcp-*.whl
+          test -f dist/rugguard_mcp-*.tar.gz
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No `password:` — OIDC handles auth via the id-token permission.

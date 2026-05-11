@@ -1,0 +1,62 @@
+[project]
+name = "rugguard-mcp"
+version = "0.1.0"
+description = "MCP server for RugGuard — pre-trade rug-check API for AI agents. Wraps the x402 payment flow so Claude Desktop, Cursor, and other MCP-aware agents can call RugGuard without speaking x402 themselves."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [
+    { name = "David Bellaiche" },
+]
+keywords = [
+    "x402",
+    "mcp",
+    "model-context-protocol",
+    "rug-check",
+    "rug-pull",
+    "crypto",
+    "base",
+    "solana",
+    "claude-desktop",
+    "cursor",
+    "ai-agent",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Security",
+]
+dependencies = [
+    # Model Context Protocol Python SDK — provides FastMCP server runtime.
+    "mcp>=1.0,<2.0",
+    # EIP-712 typed-data signing for EIP-3009 transferWithAuthorization.
+    "eth-account>=0.13,<1.0",
+    # Async HTTP client for the x402 round-trip + payment-response parsing.
+    "httpx>=0.28,<1.0",
+]
+
+[project.urls]
+Homepage = "https://rugguard.redfleet.fr"
+Repository = "https://github.com/dbe006/rugguard-mcp"
+Issues = "https://github.com/dbe006/rugguard-mcp/issues"
+"RugGuard API" = "https://rugguard.redfleet.fr/openapi.json"
+
+[project.scripts]
+# Console entry point — users invoke `rugguard-mcp` (hyphen, PyPI convention)
+# while the Python module is rugguard_mcp (underscore, PEP 8). Both work
+# from Claude Desktop's `claude_desktop_config.json` since FastMCP routes
+# either way via the same `main()` dispatcher.
+rugguard-mcp = "rugguard_mcp.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
