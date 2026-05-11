@@ -41,9 +41,12 @@ import os
 from pathlib import Path
 from typing import Any
 
+import httpx
 from mcp.server.fastmcp import FastMCP
 
 from rugguard_mcp.x402_client import SpendCapExceededError, X402PaymentError, paid_get
+
+METRICS_TIMEOUT_S = 10.0
 
 DEFAULT_API_URL = "https://rugguard.redfleet.fr"
 DEFAULT_WALLET_PATH = Path.home() / ".rugguard" / "wallet.json"
@@ -223,6 +226,58 @@ async def explain_scan(scan_id: str) -> dict[str, Any]:
     if status != 200:
         return {"error": "non_200", "status": status, "body": body}
     return body
+
+
+# --- Free read-only resources (MCP `resources` primitive, not `tools`) ---
+#
+# Resources are read-only data the agent can inspect WITHOUT a payment.
+# They show up in `list_resources()` and an agent can read them via
+# `read_resource(uri)`. We expose RugGuard's live empirical recall +
+# sample counts here so an agent (or human developer evaluating the
+# service) can audit the methodology BEFORE deciding to pay for a scan.
+#
+# Differentiator on the doorstep: no competitor MCP rug-checker exists
+# yet, and none of the API-only competitors (Rug Munch, SIBYL, CYBERA,
+# Sentinel, DeFi Intelligence) publish their own miss rate. The MCP
+# resource layer is where this becomes machine-discoverable.
+
+
+@mcp.resource("rugguard://metrics", name="RugGuard live recall", mime_type="application/json")
+async def metrics_resource() -> str:
+    """Return RugGuard's live empirical recall + per-chain sample counts.
+
+    Free (no x402 payment). Sources from `/v1/metrics` on the public API.
+    The body is the same JSON shape as the HTTP endpoint, suitable for
+    parsing by the agent or display in a chat for a human reviewer.
+
+    Use this to:
+      - Check the per-heuristic recall before pointing your funded wallet
+        at the paid `scan_token` tool.
+      - Audit what fraction of confirmed rugs each heuristic catches
+        (the workhorse is `TOP10_CONCENTRATION_HIGH` at ~94 % on Base).
+      - Read the methodology warning: HONEYPOT_* underperforms on the
+        post-rug census (the contract is dead by the time we re-measure),
+        but the forward sampler's T+30 follow-up gives the real
+        product-time precision.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=METRICS_TIMEOUT_S) as client:
+            r = await client.get(f"{_api_url()}/v1/metrics")
+            r.raise_for_status()
+            return r.text  # already JSON-stringified by the API
+    except httpx.HTTPError as exc:
+        # Surface a structured error AS JSON so the agent's parser doesn't
+        # choke on a bare string. The agent can decide whether to retry.
+        return json.dumps(
+            {
+                "error": "metrics_unreachable",
+                "detail": f"{type(exc).__name__}: {str(exc)[:200]}",
+                "hint": (
+                    "RugGuard public API may be down or unreachable from this "
+                    f"host. Try fetching {_api_url()}/v1/metrics directly."
+                ),
+            }
+        )
 
 
 def run() -> None:

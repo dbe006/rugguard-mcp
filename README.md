@@ -4,10 +4,14 @@ MCP server for [RugGuard](https://rugguard.redfleet.fr) — pre-trade rug-check 
 
 ## What it does
 
-Two MCP tools:
+Two paid MCP tools:
 
 - **`scan_token(chain, address)`** — runs 14 heuristics on Base + 5 on Solana SPL, returns a weighted risk score 0–100, a verdict (`safe | low_risk | medium_risk | high_risk | critical | uncertain`), and structured red flags (owner renounced, LP locked, honeypot signatures, top10 concentration, mint authority, bytecode similarity to known rugs via MinHash, deployer rug history, etc.). Pays $0.01 USDC on Base behind the scenes.
 - **`explain_scan(scan_id)`** — replays a previously-cached scan's full per-heuristic audit trail. Pays $0.005 USDC.
+
+One free MCP resource:
+
+- **`rugguard://metrics`** — live empirical recall + per-chain sample counts, sourced from `/v1/metrics`. Free, no payment, no signature. Lets an agent (or a human reviewing the integration) audit per-heuristic recall **before** pointing a funded wallet at the paid tools. No competitor publishes their own miss rate — this is the differentiator made machine-discoverable.
 
 The server holds a dedicated Base-mainnet wallet and signs each EIP-3009 USDC `transferWithAuthorization` transparently. The agent never sees the payment friction.
 
