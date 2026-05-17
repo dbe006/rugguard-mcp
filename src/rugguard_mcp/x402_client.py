@@ -214,6 +214,106 @@ def _extract_tx_hash_from_payment_response(header_value: str | None) -> str | No
     return tx if isinstance(tx, str) else None
 
 
+async def _x402_round_trip(
+    *,
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    private_key_hex: str,
+    json_body: dict[str, Any] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """Shared 402-then-pay-then-retry core for paid_get and paid_post.
+
+    `method` is "GET" or "POST". For POST, `json_body` is sent on both the
+    first probe and the signed retry — FastAPI's Depends() runs BEFORE
+    request-body parsing, so the body is unconsumed on the initial 402.
+
+    Spend caps are reserved BEFORE the EIP-3009 signature is computed.
+    On any non-200 outcome, the reservation is released so the cap budget
+    isn't burned by a failed call.
+    """
+    account = Account.from_key(private_key_hex.removeprefix("0x"))
+
+    first = await client.request(method, url, json=json_body)
+    if first.status_code != 402:
+        return first.status_code, first.json()
+
+    body = first.json()
+    try:
+        req = body["accepts"][0]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise X402PaymentError("invalid_402_body") from exc
+
+    # Asset / network / EIP-712 domain whitelist — refuse to sign for
+    # anything other than canonical USDC on Base. This MUST run BEFORE
+    # the cap reservation so we don't burn a charge_id on a rejected
+    # 402; and BEFORE the EIP-3009 signature so a malicious server
+    # can't drain a non-USDC token the user happens to also hold.
+    _validate_payment_requirements(req)
+
+    # Defense in depth: refuse to sign if the amount the server is asking
+    # for would push us over a configured spend cap. Enforced client-side,
+    # BEFORE the EIP-3009 signature is computed — even a compromised
+    # server can't trick us into draining the wallet, because the cap
+    # budget lives entirely on the user's machine.
+    #
+    # Concurrency: authorize_and_charge() atomically reserves the slot
+    # by appending a pending entry under a file lock. Two concurrent
+    # paid calls can't both pass the same cap baseline — the second
+    # sees the first's pending and rejects. We MUST confirm() on settle
+    # success or rollback() on any failure path, otherwise the slot leaks
+    # for up to 24 h (until the entry rolls out of the daily window).
+    atomic_amount = int(req["maxAmountRequired"])
+    amount_usd = atomic_amount / (10**USDC_DECIMALS)
+    charge_id = _authorize_and_charge(amount_usd)  # raises if over cap
+
+    try:
+        typed = _build_typed_data(
+            payer=account.address,
+            receiver=req["payTo"],
+            value=atomic_amount,
+            asset_addr=req["asset"],
+            name=req["extra"]["name"],
+            version=req["extra"]["version"],
+        )
+        signable = encode_typed_data(full_message=typed)
+        signed = Account.sign_message(signable, private_key=account.key)
+        sig = signed.signature.hex()
+        if not sig.startswith("0x"):
+            sig = "0x" + sig
+        header = _encode_payment_header(typed, sig, req["network"])
+
+        second = await client.request(
+            method, url, json=json_body, headers={"X-Payment": header}
+        )
+        if second.status_code == 402:
+            # Server rejected the payment — release the cap reservation
+            # so the user can retry without burning a slot.
+            _safely_rollback(charge_id)
+            err = second.json().get("error", "unknown")
+            raise X402PaymentError(f"payment_rejected:{err}")
+        if second.status_code == 200:
+            tx_hash = _extract_tx_hash_from_payment_response(
+                second.headers.get("X-Payment-Response")
+                or second.headers.get("Payment-Response")
+            )
+            # Promote pending → settled (best-effort: FS error mustn't
+            # fail a request the user already paid for; the pending entry
+            # will roll off the 24 h window automatically if confirm
+            # itself fails).
+            _safely_confirm(charge_id, tx_hash)
+        else:
+            # Non-200, non-402 — settle never happened, free the slot.
+            _safely_rollback(charge_id)
+        return second.status_code, second.json()
+    except BaseException:
+        # Any exit through this except path means we either never sent the
+        # signed request or never got a successful response. Free the cap
+        # reservation. Includes asyncio.CancelledError + KeyboardInterrupt.
+        _safely_rollback(charge_id)
+        raise
+
+
 async def paid_get(
     *,
     url: str,
@@ -230,85 +330,39 @@ async def paid_get(
     either the session or the 24 h total over the configured cap, raises
     SpendCapExceededError WITHOUT signing, so no payment leaves the wallet.
     """
-    account = Account.from_key(private_key_hex.removeprefix("0x"))
-
     async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-        first = await client.get(url)
-        if first.status_code != 402:
-            return first.status_code, first.json()
+        return await _x402_round_trip(
+            client=client, method="GET", url=url, private_key_hex=private_key_hex
+        )
 
-        body = first.json()
-        try:
-            req = body["accepts"][0]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise X402PaymentError("invalid_402_body") from exc
 
-        # Asset / network / EIP-712 domain whitelist — refuse to sign for
-        # anything other than canonical USDC on Base. This MUST run BEFORE
-        # the cap reservation so we don't burn a charge_id on a rejected
-        # 402; and BEFORE the EIP-3009 signature so a malicious server
-        # can't drain a non-USDC token the user happens to also hold.
-        _validate_payment_requirements(req)
+async def paid_post(
+    *,
+    url: str,
+    json_body: dict[str, Any],
+    private_key_hex: str,
+    timeout_seconds: float = 30.0,
+) -> tuple[int, dict[str, Any]]:
+    """POST an x402-protected URL with a JSON body, paying automatically on 402.
 
-        # Defense in depth: refuse to sign if the amount the server is asking
-        # for would push us over a configured spend cap. Enforced client-side,
-        # BEFORE the EIP-3009 signature is computed — even a compromised
-        # server can't trick us into draining the wallet, because the cap
-        # budget lives entirely on the user's machine.
-        #
-        # Concurrency: authorize_and_charge() atomically reserves the slot
-        # by appending a pending entry under a file lock. Two concurrent
-        # paid_get calls can't both pass the same cap baseline — the second
-        # sees the first's pending and rejects. We MUST confirm() on settle
-        # success or rollback() on any failure path, otherwise the slot leaks
-        # for up to 24 h (until the entry rolls out of the daily window).
-        atomic_amount = int(req["maxAmountRequired"])
-        amount_usd = atomic_amount / (10**USDC_DECIMALS)
-        charge_id = _authorize_and_charge(amount_usd)  # raises if over cap
+    Same semantics as `paid_get`: returns (status_code, body), raises
+    `SpendCapExceededError` before signing if the requested amount would
+    breach a cap, raises `X402PaymentError` on payment-side rejection.
 
-        try:
-            typed = _build_typed_data(
-                payer=account.address,
-                receiver=req["payTo"],
-                value=atomic_amount,
-                asset_addr=req["asset"],
-                name=req["extra"]["name"],
-                version=req["extra"]["version"],
-            )
-            signable = encode_typed_data(full_message=typed)
-            signed = Account.sign_message(signable, private_key=account.key)
-            sig = signed.signature.hex()
-            if not sig.startswith("0x"):
-                sig = "0x" + sig
-            header = _encode_payment_header(typed, sig, req["network"])
+    The JSON body is sent on BOTH the initial probe and the signed retry
+    because FastAPI's payment dependency runs before body parsing — the
+    initial 402 short-circuits before the server has consumed the body.
 
-            second = await client.get(url, headers={"X-Payment": header})
-            if second.status_code == 402:
-                # Server rejected the payment — release the cap reservation
-                # so the user can retry without burning a slot.
-                _safely_rollback(charge_id)
-                err = second.json().get("error", "unknown")
-                raise X402PaymentError(f"payment_rejected:{err}")
-            if second.status_code == 200:
-                tx_hash = _extract_tx_hash_from_payment_response(
-                    second.headers.get("X-Payment-Response")
-                    or second.headers.get("Payment-Response")
-                )
-                # Promote pending → settled (best-effort: FS error mustn't
-                # fail a request the user already paid for; the pending entry
-                # will roll off the 24 h window automatically if confirm
-                # itself fails).
-                _safely_confirm(charge_id, tx_hash)
-            else:
-                # Non-200, non-402 — settle never happened, free the slot.
-                _safely_rollback(charge_id)
-            return second.status_code, second.json()
-        except BaseException:
-            # Any exit through this except path means we either never sent the
-            # signed request or never got a successful response. Free the cap
-            # reservation. Includes asyncio.CancelledError + KeyboardInterrupt.
-            _safely_rollback(charge_id)
-            raise
+    Use for `/v1/pretrade/check` and any future POST-based paid endpoint.
+    """
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        return await _x402_round_trip(
+            client=client,
+            method="POST",
+            url=url,
+            private_key_hex=private_key_hex,
+            json_body=json_body,
+        )
 
 
 def _safely_confirm(charge_id: str, tx_hash: str | None) -> None:
@@ -331,4 +385,4 @@ def _safely_rollback(charge_id: str) -> None:
 
 # Re-export for convenience — callers (server.py) handle this distinctly
 # from network errors when surfacing to the agent.
-__all__ = ["X402PaymentError", "SpendCapExceededError", "paid_get"]
+__all__ = ["X402PaymentError", "SpendCapExceededError", "paid_get", "paid_post"]

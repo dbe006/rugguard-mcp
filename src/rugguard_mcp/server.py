@@ -1,11 +1,16 @@
 """RugGuard MCP server.
 
-Exposes two tools to MCP clients (Claude Desktop, Cursor, Heurist composers,
+Exposes three tools to MCP clients (Claude Desktop, Cursor, Heurist composers,
 LangGraph runtimes, etc.):
 
-  - `scan_token(chain, address)`  → 0-100 risk score + verdict + flags.
-                                    `chain` accepts `base` or `solana`.
-  - `explain_scan(scan_id)`       → audit-trail of a previously-cached scan.
+  - `scan_token(chain, address)`             → 0-100 risk score + verdict + flags.
+                                               `chain` accepts `base` or `solana`.
+  - `pretrade_check(chain, address,
+        intended_trade_usd, policy)`         → prescriptive block | caution | allow
+                                               recommendation + max_suggested_exposure_usd
+                                               + signed JSON report (Ed25519). The
+                                               firewall tool — call before each buy.
+  - `explain_scan(scan_id)`                  → audit-trail of a previously-cached scan.
 
 Each tool call goes through the x402 paid round-trip transparently — the
 server holds a dedicated EOA private key that signs the EIP-3009 USDC
@@ -44,7 +49,12 @@ from typing import Any
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-from rugguard_mcp.x402_client import SpendCapExceededError, X402PaymentError, paid_get
+from rugguard_mcp.x402_client import (
+    SpendCapExceededError,
+    X402PaymentError,
+    paid_get,
+    paid_post,
+)
 
 METRICS_TIMEOUT_S = 10.0
 
@@ -167,6 +177,86 @@ async def scan_token(chain: str, address: str) -> dict[str, Any]:
     url = f"{_api_url()}/v1/scan/{chain}/{address}"
     try:
         status, body = await paid_get(url=url, private_key_hex=pk)
+    except SpendCapExceededError as exc:
+        return {
+            "error": "spend_cap_exceeded",
+            "cap_kind": exc.cap_kind,
+            "cap_usd": exc.cap_usd,
+            "would_be_total_usd": exc.would_be_total_usd,
+            "message": str(exc),
+        }
+    except X402PaymentError as exc:
+        return {"error": "payment_failed", "message": str(exc)}
+    except Exception as exc:
+        return {"error": "request_failed", "message": f"{type(exc).__name__}: {exc}"}
+
+    if status != 200:
+        return {"error": "non_200", "status": status, "body": body}
+    return body
+
+
+@mcp.tool()
+async def pretrade_check(
+    chain: str,
+    address: str,
+    intended_trade_usd: float,
+    policy: str = "balanced",
+) -> dict[str, Any]:
+    """Pre-trade firewall: returns a prescriptive `block | caution | allow`
+    decision plus a clamped `max_suggested_exposure_usd`, given a token, a
+    trade size, and the agent's risk policy.
+
+    Costs $0.01 USDC on Base via x402 (same price as `scan_token`). Returns
+    a signed JSON report when the deployment has signing configured — the
+    `signature` and `key_fingerprint` fields prove what RugGuard said at the
+    moment of trade, verifiable offline via the `rugguard-verify` CLI
+    (`pip install rugguard-verify`) or against `GET /v1/pubkey`.
+
+    Args:
+        chain: `base` or `solana`.
+        address: Token contract address (EVM 0x… or Solana base58).
+        intended_trade_usd: Trade size in USD. Used to clamp the returned
+            max_suggested_exposure_usd. Must be > 0 and ≤ $1B.
+        policy: Agent risk tolerance. One of:
+            - `conservative` — block at medium_risk or worse (score ≥ 51)
+            - `balanced`     — block at high_risk or worse  (score ≥ 71)  [default]
+            - `aggressive`   — block at critical only       (score ≥ 91)
+            An `uncertain` verdict (sparse data) returns `caution` in all
+            modes — absence of evidence is not evidence of safety.
+
+    Returns:
+        On success: {
+            scan_id, chain, contract,
+            policy_recommendation: block | caution | allow,
+            policy, risk_score: 0-100, verdict, confidence,
+            reason: [{code, severity}, ...],   # top 3 flags
+            max_suggested_exposure_usd: float, # 100% if allow, 20% if caution, 0 if block
+            intended_trade_usd, scanned_at, disclaimer,
+            signature, key_fingerprint        # null when signing is unconfigured
+        }
+        On failure: {error, message}. Same error codes as `scan_token`.
+
+    Disclaimer integrity: the `disclaimer` field is inside the signed bytes.
+    Stripping or rewriting it breaks signature verification by design — a
+    downstream proxy that drops the disclaimer will cause `rugguard-verify`
+    to reject the report. That is the point.
+    """
+    try:
+        pk = _private_key()
+    except WalletConfigError as exc:
+        return {"error": "wallet_config_error", "message": str(exc)}
+    if not pk:
+        return _no_key_error()
+
+    url = f"{_api_url()}/v1/pretrade/check"
+    payload = {
+        "chain": chain,
+        "contract": address,
+        "intended_trade_usd": intended_trade_usd,
+        "policy": policy,
+    }
+    try:
+        status, body = await paid_post(url=url, json_body=payload, private_key_hex=pk)
     except SpendCapExceededError as exc:
         return {
             "error": "spend_cap_exceeded",

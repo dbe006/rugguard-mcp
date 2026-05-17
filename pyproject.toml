@@ -1,6 +1,6 @@
 [project]
 name = "rugguard-mcp"
-version = "0.1.2"
+version = "0.2.0"
 description = "MCP server for RugGuard — pre-trade rug-check API for AI agents. Wraps the x402 payment flow so Claude Desktop, Cursor, and other MCP-aware agents can call RugGuard without speaking x402 themselves."
 readme = "README.md"
 license = { text = "MIT" }
@@ -34,7 +34,7 @@ classifiers = [
 ]
 dependencies = [
     # Model Context Protocol Python SDK — provides FastMCP server runtime.
-    "mcp>=1.0,<2.0",
+    "mcp>=1.23.0,<2.0",
     # EIP-712 typed-data signing for EIP-3009 transferWithAuthorization.
     "eth-account>=0.13,<1.0",
     # Async HTTP client for the x402 round-trip + payment-response parsing.

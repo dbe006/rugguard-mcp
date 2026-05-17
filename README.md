@@ -4,9 +4,10 @@ MCP server for [RugGuard](https://rugguard.redfleet.fr) — pre-trade rug-check 
 
 ## What it does
 
-Two paid MCP tools:
+Three paid MCP tools:
 
 - **`scan_token(chain, address)`** — runs 14 heuristics on Base + 5 on Solana SPL, returns a weighted risk score 0–100, a verdict (`safe | low_risk | medium_risk | high_risk | critical | uncertain`), and structured red flags (owner renounced, LP locked, honeypot signatures, top10 concentration, mint authority, bytecode similarity to known rugs via MinHash, deployer rug history, etc.). Pays $0.01 USDC on Base behind the scenes.
+- **`pretrade_check(chain, address, intended_trade_usd, policy)`** *(new in v0.2.0)* — the pre-trade firewall. Wraps the same engine as `scan_token` and overlays a prescriptive `block | caution | allow` decision plus a clamped `max_suggested_exposure_usd`, given the agent's risk policy (`conservative | balanced | aggressive`). Returns a signed JSON report (Ed25519) when the deployment has signing configured — verifiable offline via the [`rugguard-verify`](https://pypi.org/project/rugguard-verify/) CLI. Same $0.01 USDC price as `scan_token`.
 - **`explain_scan(scan_id)`** — replays a previously-cached scan's full per-heuristic audit trail. Pays $0.005 USDC.
 
 One free MCP resource:
@@ -54,7 +55,7 @@ Edit `claude_desktop_config.json` (`%APPDATA%\Claude\claude_desktop_config.json`
 }
 ```
 
-Restart Claude Desktop. The `scan_token` and `explain_scan` tools appear in the tool drawer.
+Restart Claude Desktop. The `scan_token`, `pretrade_check`, and `explain_scan` tools appear in the tool drawer.
 
 ### Cursor / other MCP clients
 
