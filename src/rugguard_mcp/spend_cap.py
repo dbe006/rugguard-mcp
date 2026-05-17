@@ -90,7 +90,7 @@ _STALE_LOCK_AGE_S = 30.0
 # prevented it from subclassing X402PaymentError. The re-export below
 # keeps the import path `from rugguard_mcp.spend_cap import
 # SpendCapExceededError` working unchanged.
-from rugguard_mcp.errors import SpendCapExceededError  # noqa: E402, F401
+from rugguard_mcp.errors import SpendCapExceededError  # noqa: E402
 
 
 @dataclass(frozen=True)

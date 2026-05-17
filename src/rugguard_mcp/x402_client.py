@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re as _re
 import secrets
 import time
 from typing import Any
@@ -31,8 +32,14 @@ from eth_account.messages import encode_typed_data
 
 from rugguard_mcp.spend_cap import (
     SpendCapExceededError,
+)
+from rugguard_mcp.spend_cap import (
     authorize_and_charge as _authorize_and_charge,
+)
+from rugguard_mcp.spend_cap import (
     confirm as _confirm_spend,
+)
+from rugguard_mcp.spend_cap import (
     rollback as _rollback_spend,
 )
 
@@ -86,7 +93,7 @@ EXPECTED_EIP712_VERSION = "2"
 # it without a circular import. The re-import below keeps every existing
 # `from rugguard_mcp.x402_client import X402PaymentError` call site
 # working unchanged.
-from rugguard_mcp.errors import X402PaymentError  # noqa: E402, F401
+from rugguard_mcp.errors import X402PaymentError  # noqa: E402
 
 
 def _build_typed_data(
@@ -207,11 +214,23 @@ def _validate_payment_requirements(req: dict[str, Any]) -> None:
         )
 
 
+# tx_hash format on EVM chains: 0x-prefixed 64-char lowercase or mixed-case
+# hex. v0.2.3 hardens against a malicious facilitator embedding arbitrary
+# strings (path traversal, control chars, JSON injection) into the spend
+# log via the X-Payment-Response header. The spend log file is mode 0600
+# so the blast radius is limited to confusing audit readers, but cheap to
+# block at the source.
+_TX_HASH_RE = _re.compile(r"^0x[0-9a-fA-F]{64}$")
+
+
 def _extract_tx_hash_from_payment_response(header_value: str | None) -> str | None:
     """Best-effort decode of the X-Payment-Response header to surface the
     on-chain tx hash for the spend log. Returns None silently on any decode
-    error — the log entry just goes without a tx hash, which is a recoverable
-    audit gap (not a security issue)."""
+    error OR on a tx_hash that doesn't match the canonical 0x-64-hex shape
+    — the log entry just goes without a tx hash, which is a recoverable
+    audit gap (not a security issue). The regex check defends against a
+    malicious facilitator writing arbitrary attacker-controlled strings
+    into the user's audit trail."""
     if not header_value:
         return None
     try:
@@ -222,7 +241,31 @@ def _extract_tx_hash_from_payment_response(header_value: str | None) -> str | No
         # JSONDecodeError — all ValueError subclasses since Python 3.10.
         return None
     tx = payload.get("transaction") if isinstance(payload, dict) else None
-    return tx if isinstance(tx, str) else None
+    if not isinstance(tx, str):
+        return None
+    if not _TX_HASH_RE.match(tx):
+        # Reject any non-canonical tx hash. A malicious facilitator could
+        # otherwise write attacker-controlled strings into the user's
+        # spend log file (mode 0600, but worth blocking at the source).
+        # The absent tx_hash in the subsequent log entry IS the audit
+        # signal — the operator notices "settled but no on-chain hash"
+        # and investigates.
+        return None
+    return tx
+
+
+def _frozen_body(json_body: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Snapshot the caller's `json_body` so probe + signed retry send the
+    SAME bytes. Defends against a TOCTOU bug where another coroutine
+    mutates the dict between the 402 probe and the signed retry (e.g.,
+    an LLM-driven loop holding the same dict reference under
+    asyncio.gather)."""
+    if json_body is None:
+        return None
+    # json.dumps + json.loads gives a deep snapshot that's also guaranteed
+    # JSON-serializable — fails fast if the caller passed something
+    # uncloneable rather than discovering the bug at httpx.post time.
+    return json.loads(json.dumps(json_body, separators=(",", ":")))
 
 
 async def _x402_round_trip(
@@ -242,10 +285,22 @@ async def _x402_round_trip(
     Spend caps are reserved BEFORE the EIP-3009 signature is computed.
     On any non-200 outcome, the reservation is released so the cap budget
     isn't burned by a failed call.
+
+    v0.2.3: the body is snapshot via `_frozen_body` before either request
+    so a concurrent coroutine holding the same dict reference can't mutate
+    it between the 402 probe and the signed retry. The server's payment
+    dependency runs before request-body parsing, so the body itself is
+    unconsumed on the initial 402 — but the wire bytes still need to be
+    identical across both requests in case the server logs them for
+    audit.
     """
     account = Account.from_key(private_key_hex.removeprefix("0x"))
 
-    first = await client.request(method, url, json=json_body)
+    # Snapshot the caller's body so probe + retry send identical bytes,
+    # even if a concurrent coroutine holds the same dict reference.
+    frozen_body = _frozen_body(json_body)
+
+    first = await client.request(method, url, json=frozen_body)
     if first.status_code != 402:
         return first.status_code, first.json()
 
@@ -295,7 +350,7 @@ async def _x402_round_trip(
         header = _encode_payment_header(typed, sig, req["network"])
 
         second = await client.request(
-            method, url, json=json_body, headers={"X-Payment": header}
+            method, url, json=frozen_body, headers={"X-Payment": header}
         )
         if second.status_code == 402:
             # Server rejected the payment — release the cap reservation
@@ -396,4 +451,4 @@ def _safely_rollback(charge_id: str) -> None:
 
 # Re-export for convenience — callers (server.py) handle this distinctly
 # from network errors when surfacing to the agent.
-__all__ = ["X402PaymentError", "SpendCapExceededError", "paid_get", "paid_post"]
+__all__ = ["SpendCapExceededError", "X402PaymentError", "paid_get", "paid_post"]

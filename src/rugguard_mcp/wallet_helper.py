@@ -6,7 +6,7 @@ MCP server and prints onboarding instructions. The wallet is stored under
 
 Why a dedicated wallet:
   - Limits blast radius if the private key leaks.
-  - Lets the user fund a small bounded balance ($5–20) and treat it as a
+  - Lets the user fund a small bounded balance ($5 to $20) and treat it as a
     spending cap, on top of the in-process caps in spend_cap.py.
   - Makes accidental private-key commits less catastrophic (the wallet only
     holds what was deposited for RugGuard calls).
@@ -103,7 +103,7 @@ def init_wallet(*, force: bool = False, output_stream: Any = None) -> int:
         f"  Permissions   : 0600 (POSIX best-effort)\n"
         "\n"
         "  Next steps:\n"
-        "    1. Send 5–20 USDC on Base mainnet to the address above.\n"
+        "    1. Send 5 to 20 USDC on Base mainnet to the address above.\n"
         "       (Coinbase: withdraw → Asset USDC → Network Base → paste address.\n"
         "        Binance: same, ensure 'BASE' network, not 'BSC' or 'BEP20'.)\n"
         "    2. Wait for confirmation on basescan: https://basescan.org/address/"

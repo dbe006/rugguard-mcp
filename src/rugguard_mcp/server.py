@@ -241,6 +241,37 @@ async def pretrade_check(
     downstream proxy that drops the disclaimer will cause `rugguard-verify`
     to reject the report. That is the point.
     """
+    # v0.2.3 client-side argument validation. The server enforces the
+    # same constraints and returns 400 INVALID_*, but client-side
+    # validation saves a round-trip charge_id reservation + the $0.01
+    # paid round-trip for an obviously-invalid call.
+    if chain not in ("base", "solana"):
+        return {
+            "error": "invalid_arguments",
+            "message": (
+                f"chain must be 'base' or 'solana' (got {chain!r}). "
+                "RugGuard does not support other chains today."
+            ),
+        }
+    if policy not in ("conservative", "balanced", "aggressive"):
+        return {
+            "error": "invalid_arguments",
+            "message": (
+                f"policy must be one of conservative/balanced/aggressive "
+                f"(got {policy!r})."
+            ),
+        }
+    if not (0 < intended_trade_usd <= 1_000_000_000):
+        return {
+            "error": "invalid_arguments",
+            "message": (
+                f"intended_trade_usd must be > 0 and ≤ $1B (got "
+                f"{intended_trade_usd}). The $1B cap mirrors the server-side "
+                "bound and stops a fat-fingered LLM from producing absurd "
+                "max_suggested_exposure_usd values in the signed response."
+            ),
+        }
+
     try:
         pk = _private_key()
     except WalletConfigError as exc:
