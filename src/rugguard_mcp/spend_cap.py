@@ -85,19 +85,12 @@ _LOCK_TIMEOUT_S = 5.0
 _STALE_LOCK_AGE_S = 30.0
 
 
-class SpendCapExceededError(RuntimeError):
-    """Raised when a payment would push the total over a configured cap."""
-
-    def __init__(self, cap_kind: str, cap_usd: float, would_be_total_usd: float) -> None:
-        super().__init__(
-            f"{cap_kind} cap of ${cap_usd:.4f} would be exceeded "
-            f"(post-charge total: ${would_be_total_usd:.4f}). "
-            "Restart the server to reset the session cap, or top up the daily "
-            "cap with RUGGUARD_MCP_DAILY_SPEND_CAP_USD."
-        )
-        self.cap_kind = cap_kind
-        self.cap_usd = cap_usd
-        self.would_be_total_usd = would_be_total_usd
+# SpendCapExceededError was defined here in v0.1.x and v0.2.0. Moved to
+# `rugguard_mcp.errors` in v0.2.1 to break the circular dependency that
+# prevented it from subclassing X402PaymentError. The re-export below
+# keeps the import path `from rugguard_mcp.spend_cap import
+# SpendCapExceededError` working unchanged.
+from rugguard_mcp.errors import SpendCapExceededError  # noqa: E402, F401
 
 
 @dataclass(frozen=True)

@@ -81,8 +81,12 @@ EXPECTED_EIP712_NAME = "USD Coin"
 EXPECTED_EIP712_VERSION = "2"
 
 
-class X402PaymentError(RuntimeError):
-    """Raised when payment cannot be completed (verify or settle failed)."""
+# X402PaymentError was defined here in v0.1.x and v0.2.0. Moved to
+# `rugguard_mcp.errors` in v0.2.1 so SpendCapExceededError can subclass
+# it without a circular import. The re-import below keeps every existing
+# `from rugguard_mcp.x402_client import X402PaymentError` call site
+# working unchanged.
+from rugguard_mcp.errors import X402PaymentError  # noqa: E402, F401
 
 
 def _build_typed_data(
