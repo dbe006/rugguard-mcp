@@ -128,7 +128,14 @@ def _build_typed_data(
             "from": payer,
             "to": receiver,
             "value": value,
-            "validAfter": 0,
+            # v0.2.2: tightened from 0 to (now - 5). The 5s backward
+            # clock-skew tolerance is enough for a facilitator with a
+            # mildly fast clock to still accept us, while reducing the
+            # signature's TOTAL liveness window to ~15s (SIG_VALID_WINDOW_S
+            # forward + 5s back) — well under the EIP-3009 60s ceiling.
+            # Mirrors the integration kits' inline x402_pay.py which has
+            # used `now - 5` since v0.1.0.
+            "validAfter": now - 5,
             "validBefore": now + SIG_VALID_WINDOW_SECONDS,
             "nonce": "0x" + secrets.token_hex(32),
         },

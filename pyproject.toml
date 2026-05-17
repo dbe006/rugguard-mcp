@@ -1,6 +1,6 @@
 [project]
 name = "rugguard-mcp"
-version = "0.2.1"
+version = "0.2.2"
 description = "MCP server for RugGuard — pre-trade rug-check API for AI agents. Wraps the x402 payment flow so Claude Desktop, Cursor, and other MCP-aware agents can call RugGuard without speaking x402 themselves."
 readme = "README.md"
 license = { text = "MIT" }
