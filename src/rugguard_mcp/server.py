@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,136 @@ METRICS_TIMEOUT_S = 10.0
 
 DEFAULT_API_URL = "https://rugguard.redfleet.fr"
 DEFAULT_WALLET_PATH = Path.home() / ".rugguard" / "wallet.json"
+
+
+def _demo_mode() -> bool:
+    """True when the operator has opted into demo mode (no wallet, no
+    paid round-trip, canned scenarios). Set via:
+
+      - env var `RUGGUARD_MCP_DEMO=1` (or any truthy value)
+      - CLI flag `--demo` (sets the env var before server import)
+
+    Read at call time, not import time, so tests can monkeypatch the env
+    without juggling module reloads. Cheap (one env-var lookup).
+    """
+    return os.environ.get("RUGGUARD_MCP_DEMO", "").lower() in ("1", "true", "yes", "on")
+
+
+# Demo scenarios. Mirror the shape of real responses byte-for-byte so a
+# developer who builds against demo doesn't get surprises in production.
+# The `_demo: true` field is added by the dispatcher so an agent can flag
+# the response as non-authoritative — never make a real trade decision
+# from these.
+_DEMO_TIMESTAMP = "2026-05-17T00:00:00+00:00"
+_DEMO_DISCLAIMER = "DEMO RESPONSE — not a real scan, do not trade on this."
+
+_DEMO_SCAN_SAFE = {
+    "scan_id": "demo-safe-01",
+    "chain": "base",
+    "contract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "score": 12,
+    "verdict": "safe",
+    "score_confidence": "high",
+    "rug_probability_30d": 0.02,
+    "flags": [],
+    "scanned_at": _DEMO_TIMESTAMP,
+    "disclaimer": _DEMO_DISCLAIMER,
+}
+_DEMO_SCAN_CAUTION = {
+    "scan_id": "demo-caution-01",
+    "chain": "base",
+    "contract": "0x4ed4E862860beD51a9570b96d89aF5E1B0Efefed",
+    "score": 62,
+    "verdict": "medium_risk",
+    "score_confidence": "high",
+    "rug_probability_30d": 0.41,
+    "flags": [
+        {"code": "OWNER_NOT_RENOUNCED", "severity": "high",
+         "evidence": "Owner has admin privileges and can call setTaxRate, blacklist, pause."},
+        {"code": "TOP10_CONCENTRATION_HIGH", "severity": "high",
+         "evidence": "Top 10 wallets hold 71% of supply (deployer + 9 fresh addresses)."},
+    ],
+    "scanned_at": _DEMO_TIMESTAMP,
+    "disclaimer": _DEMO_DISCLAIMER,
+}
+_DEMO_SCAN_CRITICAL = {
+    "scan_id": "demo-critical-01",
+    "chain": "base",
+    "contract": "0xfc0482b1abd9da4a90a512305eeac472ffb88e1f",
+    "score": 95,
+    "verdict": "critical",
+    "score_confidence": "high",
+    "rug_probability_30d": 0.88,
+    "flags": [
+        {"code": "TOP10_CONCENTRATION_HIGH", "severity": "critical",
+         "evidence": "One wallet holds 94% of supply."},
+        {"code": "LP_INSUFFICIENT_LIQUIDITY", "severity": "critical",
+         "evidence": "LP holds 0.003 WETH, below the $50 floor."},
+        {"code": "BYTECODE_SIMILAR_TO_RUG", "severity": "high",
+         "evidence": "MinHash similarity 0.87 to a previously-rugged contract."},
+    ],
+    "scanned_at": _DEMO_TIMESTAMP,
+    "disclaimer": _DEMO_DISCLAIMER,
+}
+
+_DEMO_SCAN_CYCLE = (_DEMO_SCAN_SAFE, _DEMO_SCAN_CAUTION, _DEMO_SCAN_CRITICAL)
+
+
+def _demo_pick(address: str) -> dict[str, Any]:
+    """Deterministic scenario picker: cycle safe/caution/critical based on
+    the last hex char of the address. Same address always returns the same
+    scenario across runs, so demos are reproducible."""
+    last = address.strip().lower()[-1:] if address else "0"
+    try:
+        idx = int(last, 16) % 3
+    except ValueError:
+        idx = 0
+    return dict(_DEMO_SCAN_CYCLE[idx])  # shallow copy so per-call _demo flag doesn't leak
+
+
+def _demo_policy_decision(verdict: str, policy: str) -> tuple[str, float]:
+    """Demo-mode mirror of the server's verdict -> policy_recommendation
+    mapping. Returns (recommendation, exposure_multiplier).
+
+      conservative: block at medium_risk or worse
+      balanced   : block at high_risk or worse  (default)
+      aggressive : block at critical only
+
+    Exposure multiplier: 1.0 for allow, 0.2 for caution, 0.0 for block."""
+    severity = {"safe": 0, "low_risk": 1, "medium_risk": 2, "high_risk": 3, "critical": 4}
+    threshold = {"conservative": 2, "balanced": 3, "aggressive": 4}.get(policy, 3)
+    s = severity.get(verdict, 4)
+    if s >= threshold:
+        return "block", 0.0
+    if s >= threshold - 1:
+        return "caution", 0.2
+    return "allow", 1.0
+
+
+def _demo_print_banner_once() -> None:
+    """Print the demo banner to stderr once per process. Stderr because
+    stdout is the MCP transport channel — anything we write there breaks
+    the protocol. Use a module-level flag so we don't spam if multiple
+    tool calls happen in the same session."""
+    global _DEMO_BANNER_PRINTED
+    if _DEMO_BANNER_PRINTED:
+        return
+    _DEMO_BANNER_PRINTED = True
+    print(
+        "==============================================================\n"
+        "  RugGuard MCP — DEMO MODE\n"
+        "  Returns canned scenarios. No wallet, no payment, no network\n"
+        "  call to /v1/scan or /v1/pretrade/check. The `rugguard://metrics`\n"
+        "  resource still serves real data — it is free.\n"
+        "  Disable demo mode by unsetting RUGGUARD_MCP_DEMO and dropping\n"
+        "  the --demo flag.\n"
+        "==============================================================",
+        file=sys.stderr,
+    )
+
+
+_DEMO_BANNER_PRINTED = False
+
 
 mcp = FastMCP("rugguard")
 
@@ -166,7 +297,19 @@ async def scan_token(chain: str, address: str) -> dict[str, Any]:
         On failure: {error, message}. `error` is one of `missing_credentials`,
                     `spend_cap_exceeded`, `payment_failed`, `request_failed`,
                     `non_200`.
+
+        In demo mode (RUGGUARD_MCP_DEMO=1 or `--demo`): returns one of three
+        canned scenarios deterministically by `address[-1]`. Response has
+        `_demo: true` — never trade on this. No wallet, no network call.
     """
+    if _demo_mode():
+        _demo_print_banner_once()
+        scenario = _demo_pick(address)
+        scenario["chain"] = chain
+        scenario["contract"] = address
+        scenario["_demo"] = True
+        return scenario
+
     try:
         pk = _private_key()
     except WalletConfigError as exc:
@@ -272,6 +415,31 @@ async def pretrade_check(
             ),
         }
 
+    if _demo_mode():
+        _demo_print_banner_once()
+        # Same address-based scenario picker as scan_token, but we also
+        # map verdict -> policy_recommendation per the agent's policy.
+        scan = _demo_pick(address)
+        rec, exposure_mult = _demo_policy_decision(scan["verdict"], policy)
+        return {
+            "scan_id": scan["scan_id"].replace("demo-", "demo-pre-"),
+            "chain": chain,
+            "contract": address,
+            "policy_recommendation": rec,
+            "policy": policy,
+            "risk_score": scan["score"],
+            "verdict": scan["verdict"],
+            "confidence": scan["score_confidence"],
+            "reason": scan["flags"][:3],
+            "max_suggested_exposure_usd": round(intended_trade_usd * exposure_mult, 2),
+            "intended_trade_usd": intended_trade_usd,
+            "scanned_at": _DEMO_TIMESTAMP,
+            "disclaimer": _DEMO_DISCLAIMER,
+            "signature": None,
+            "key_fingerprint": None,
+            "_demo": True,
+        }
+
     try:
         pk = _private_key()
     except WalletConfigError as exc:
@@ -320,7 +488,40 @@ async def explain_scan(scan_id: str) -> dict[str, Any]:
     Returns:
         On success: {scan_id, scanned_at, score, verdict, heuristic_results: [...]}.
         On failure: {error, message}. Same error codes as `scan_token`.
+
+        In demo mode: returns a canned audit trail keyed by the scan_id
+        suffix (`demo-safe-01`, `demo-caution-01`, `demo-critical-01`).
+        Unknown scan_ids return a demo-safe trail. Response has `_demo: true`.
     """
+    if _demo_mode():
+        _demo_print_banner_once()
+        # Match the scan_id back to its canned scenario. If the agent
+        # passes an unrelated id (e.g. one from a real scan run earlier),
+        # default to the safe scenario rather than 404 — the goal of demo
+        # mode is "always something useful," not strict fidelity.
+        if "critical" in scan_id:
+            scenario = _DEMO_SCAN_CRITICAL
+        elif "caution" in scan_id:
+            scenario = _DEMO_SCAN_CAUTION
+        else:
+            scenario = _DEMO_SCAN_SAFE
+        return {
+            "scan_id": scan_id,
+            "chain": scenario["chain"],
+            "contract": scenario["contract"],
+            "score": scenario["score"],
+            "verdict": scenario["verdict"],
+            "score_confidence": scenario["score_confidence"],
+            "scanned_at": _DEMO_TIMESTAMP,
+            "heuristic_results": [
+                {"code": f.get("code"), "decision": "fail",
+                 "severity": f.get("severity"), "evidence": f.get("evidence")}
+                for f in scenario["flags"]
+            ],
+            "disclaimer": _DEMO_DISCLAIMER,
+            "_demo": True,
+        }
+
     try:
         pk = _private_key()
     except WalletConfigError as exc:

@@ -22,6 +22,50 @@ The server holds a dedicated Base-mainnet wallet and signs each EIP-3009 USDC `t
 pip install rugguard-mcp
 ```
 
+## Try it without paying (recommended first step)
+
+Before funding a wallet, verify the MCP integration works end-to-end in
+Claude Desktop / Cursor / your runtime. Launch the server in demo mode:
+
+```bash
+python -m rugguard_mcp --demo
+```
+
+Or configure your MCP client to launch it that way directly:
+
+```json
+{
+  "mcpServers": {
+    "rugguard": {
+      "command": "python",
+      "args": ["-m", "rugguard_mcp", "--demo"]
+    }
+  }
+}
+```
+
+(equivalent: set `RUGGUARD_MCP_DEMO=1` in the `env` block of the MCP
+client config).
+
+In demo mode the three paid tools return canned scenarios deterministically
+(safe / caution / critical, picked by the last hex char of the address)
+flagged with `"_demo": true` so the agent never mistakes them for real
+data. No wallet, no payment, no network call to `/v1/scan` or
+`/v1/pretrade/check`. The free `rugguard://metrics` resource still serves
+the real live recall numbers.
+
+Use this to:
+
+- Verify the tool drawer shows `scan_token`, `pretrade_check`,
+  `explain_scan` in Claude Desktop / Cursor.
+- Walk through a full scan → decision flow in your agent before
+  committing on-chain funds.
+- Build and test conditional edges / state branches against realistic
+  response shapes.
+
+When you're ready for real scans, drop the `--demo` flag and follow the
+First-time setup below.
+
 ## First-time setup
 
 Generate a dedicated wallet (never reuse your main one):
